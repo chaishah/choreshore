@@ -1,39 +1,25 @@
-create extension if not exists "pgcrypto";
-
-create table if not exists public.profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
-  username text,
-  display_name text,
-  avatar_url text,
-  role text not null default 'player' check (role in ('admin', 'player')),
-  total_points integer not null default 0 check (total_points >= 0),
-  created_at timestamptz not null default now()
-);
+alter table public.profiles
+  add column if not exists username text,
+  add column if not exists role text not null default 'player' check (role in ('admin', 'player'));
 
 create unique index if not exists profiles_username_key
   on public.profiles (lower(username))
   where username is not null;
 
-create table if not exists public.chores (
-  id uuid primary key default gen_random_uuid(),
-  title text not null,
-  description text,
-  frequency text not null check (frequency in ('daily', 'weekly', 'one-off')),
-  base_points integer not null check (base_points > 0),
-  status text not null default 'bidding_open' check (status in ('unassigned', 'bidding_open', 'assigned', 'pending_approval', 'completed')),
-  assigned_to uuid references public.profiles(id) on delete set null,
-  final_points integer check (final_points is null or final_points > 0),
-  created_at timestamptz not null default now()
-);
-
-create table if not exists public.bids (
-  id uuid primary key default gen_random_uuid(),
-  chore_id uuid not null references public.chores(id) on delete cascade,
-  player_id uuid not null references public.profiles(id) on delete cascade,
-  bid_amount integer not null check (bid_amount > 0),
-  created_at timestamptz not null default now(),
-  unique (chore_id, player_id)
-);
+create or replace function public.is_admin(user_uuid uuid default auth.uid())
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1
+    from public.profiles
+    where id = user_uuid
+      and role = 'admin'
+  );
+$$;
 
 create or replace function public.create_profile_for_new_user()
 returns trigger
@@ -54,31 +40,14 @@ begin
     new.raw_user_meta_data ->> 'avatar_url',
     case when requested_role = 'admin' then 'admin' else 'player' end
   )
-  on conflict (id) do nothing;
+  on conflict (id) do update
+  set username = excluded.username,
+      display_name = excluded.display_name,
+      avatar_url = excluded.avatar_url;
 
   return new;
 end;
 $$;
-
-create or replace function public.is_admin(user_uuid uuid default auth.uid())
-returns boolean
-language sql
-security definer
-set search_path = public
-stable
-as $$
-  select exists (
-    select 1
-    from public.profiles
-    where id = user_uuid
-      and role = 'admin'
-  );
-$$;
-
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created
-  after insert on auth.users
-  for each row execute function public.create_profile_for_new_user();
 
 create or replace function public.close_chore_bidding(chore_uuid uuid)
 returns public.chores
@@ -175,9 +144,16 @@ begin
 end;
 $$;
 
-alter table public.profiles enable row level security;
-alter table public.chores enable row level security;
-alter table public.bids enable row level security;
+drop policy if exists "Profiles are readable by everyone" on public.profiles;
+drop policy if exists "Players can update their own profile" on public.profiles;
+drop policy if exists "Admins can update profiles" on public.profiles;
+drop policy if exists "Chores are readable by everyone" on public.chores;
+drop policy if exists "Authenticated players can create chores" on public.chores;
+drop policy if exists "Admins can create chores" on public.chores;
+drop policy if exists "Assignees can submit assigned chores" on public.chores;
+drop policy if exists "Bids are readable by everyone" on public.bids;
+drop policy if exists "Authenticated players can bid on open chores" on public.bids;
+drop policy if exists "Players can update their own bids while bidding is open" on public.bids;
 
 create policy "Profiles are readable by authenticated users"
   on public.profiles for select
@@ -241,10 +217,3 @@ create policy "Players can update their own bids while bidding is open"
         and chores.status = 'bidding_open'
     )
   );
-
-insert into public.chores (title, description, frequency, base_points, status)
-values
-  ('Reset kitchen counters', 'Clear dishes, wipe benches, and take compost out.', 'daily', 80, 'bidding_open'),
-  ('Laundry sprint', 'Wash, dry, fold, and return one full load.', 'weekly', 120, 'bidding_open'),
-  ('Bathroom reset', 'Sink, mirror, toilet, and floor.', 'weekly', 140, 'bidding_open')
-on conflict do nothing;

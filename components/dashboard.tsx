@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { animate, stagger } from "animejs";
 import {
   Award,
@@ -24,174 +24,125 @@ import {
   Users,
 } from "lucide-react";
 import Link from "next/link";
+import { createPlayerAction } from "@/app/actions";
+import { usernameToEmail } from "@/lib/auth";
+import { isSupabaseConfigured, supabase } from "@/lib/supabase";
+import type { ActiveChore, ChoreWithBid, Profile } from "@/types/database";
 
-type Role = "admin" | "player";
-type ChoreStatus = "bidding_open" | "assigned" | "pending_approval" | "completed";
-
-type QuestUser = {
-  id: string;
-  username: string;
-  password: string;
-  displayName: string;
-  role: Role;
-  points: number;
-  createdAt: string;
-};
-
-type QuestBid = {
-  playerId: string;
-  amount: number;
-  createdAt: string;
-};
-
-type QuestChore = {
-  id: string;
-  title: string;
-  description: string;
-  frequency: "daily" | "weekly" | "one-off";
-  basePoints: number;
-  status: ChoreStatus;
-  assignedTo: string | null;
-  finalPoints: number | null;
-  createdAt: string;
-  bids: QuestBid[];
-};
-
-type QuestState = {
-  users: QuestUser[];
-  chores: QuestChore[];
-};
-
-const STORAGE_KEY = "chorequest-static-state-v2";
-const SESSION_KEY = "chorequest-static-session-v2";
-const ADMIN_USERNAME = "admin";
-const ADMIN_PASSWORD = "ChoreQuest#2026";
-
-const defaultState: QuestState = {
-  users: [
-    {
-      id: "admin-static",
-      username: ADMIN_USERNAME,
-      password: ADMIN_PASSWORD,
-      displayName: "Quest Master",
-      role: "admin",
-      points: 0,
-      createdAt: "2026-05-29T00:00:00.000Z",
-    },
-    {
-      id: "player-mika",
-      username: "mika",
-      password: "mika123",
-      displayName: "Mika",
-      role: "player",
-      points: 220,
-      createdAt: "2026-05-29T00:00:00.000Z",
-    },
-    {
-      id: "player-ari",
-      username: "ari",
-      password: "ari123",
-      displayName: "Ari",
-      role: "player",
-      points: 160,
-      createdAt: "2026-05-29T00:00:00.000Z",
-    },
-  ],
-  chores: [
-    {
-      id: "quest-kitchen",
-      title: "Kitchen Reset",
-      description: "Clear dishes, wipe benches, reset the sink, and take compost out.",
-      frequency: "daily",
-      basePoints: 90,
-      status: "bidding_open",
-      assignedTo: null,
-      finalPoints: null,
-      createdAt: "2026-05-29T00:00:00.000Z",
-      bids: [{ playerId: "player-ari", amount: 55, createdAt: "2026-05-29T00:00:00.000Z" }],
-    },
-    {
-      id: "quest-laundry",
-      title: "Laundry Raid",
-      description: "Wash, dry, fold, and deliver one full shared load.",
-      frequency: "weekly",
-      basePoints: 130,
-      status: "bidding_open",
-      assignedTo: null,
-      finalPoints: null,
-      createdAt: "2026-05-29T00:00:00.000Z",
-      bids: [{ playerId: "player-mika", amount: 85, createdAt: "2026-05-29T00:00:00.000Z" }],
-    },
-    {
-      id: "quest-vacuum",
-      title: "Hallway Sweep",
-      description: "Vacuum entry, hallway, and living room paths.",
-      frequency: "weekly",
-      basePoints: 100,
-      status: "assigned",
-      assignedTo: "player-mika",
-      finalPoints: 70,
-      createdAt: "2026-05-29T00:00:00.000Z",
-      bids: [{ playerId: "player-mika", amount: 70, createdAt: "2026-05-29T00:00:00.000Z" }],
-    },
-  ],
-};
-
-function cloneDefaultState(): QuestState {
-  return JSON.parse(JSON.stringify(defaultState)) as QuestState;
-}
-
-function createId(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function loadStoredState(): QuestState {
-  if (typeof window === "undefined") {
-    return cloneDefaultState();
-  }
-
-  const stored = window.localStorage.getItem(STORAGE_KEY);
-  if (!stored) {
-    const seeded = cloneDefaultState();
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
-    return seeded;
-  }
-
-  try {
-    return JSON.parse(stored) as QuestState;
-  } catch {
-    const seeded = cloneDefaultState();
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
-    return seeded;
-  }
-}
+type ChoreFrequency = "daily" | "weekly" | "one-off";
 
 export function Dashboard() {
-  const [state, setState] = useState<QuestState>(() => cloneDefaultState());
-  const [activeUserId, setActiveUserId] = useState<string | null>(null);
-  const [login, setLogin] = useState({ username: ADMIN_USERNAME, password: ADMIN_PASSWORD });
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [chores, setChores] = useState<ChoreWithBid[]>([]);
+  const [activeChores, setActiveChores] = useState<ActiveChore[]>([]);
+  const [pendingChores, setPendingChores] = useState<ActiveChore[]>([]);
+  const [completedChores, setCompletedChores] = useState<ActiveChore[]>([]);
+  const [currentProfile, setCurrentProfile] = useState<Profile | null>(null);
+  const [login, setLogin] = useState({ username: "admin", password: "" });
   const [newUser, setNewUser] = useState({ displayName: "", username: "", password: "" });
   const [newChore, setNewChore] = useState({
     title: "",
     description: "",
-    frequency: "weekly" as QuestChore["frequency"],
+    frequency: "weekly" as ChoreFrequency,
     basePoints: "100",
   });
   const [draftBids, setDraftBids] = useState<Record<string, string>>({});
-  const [message, setMessage] = useState("Admin login is prefilled for first setup.");
+  const [message, setMessage] = useState(
+    isSupabaseConfigured
+      ? "Sign in with a Supabase Auth username and password."
+      : "Add Supabase environment variables to enable database-backed login.",
+  );
+  const [isPending, startTransition] = useTransition();
   const stageRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    const storedState = loadStoredState();
-    setState(storedState);
-    setActiveUserId(window.localStorage.getItem(SESSION_KEY));
+  const isAdmin = currentProfile?.role === "admin";
+  const isPlayer = currentProfile?.role === "player";
+
+  const leaderboard = useMemo(
+    () => profiles.filter((profile) => profile.role === "player").sort((a, b) => b.total_points - a.total_points),
+    [profiles],
+  );
+
+  const loadData = useCallback(async () => {
+    if (!supabase) {
+      return;
+    }
+
+    const [
+      { data: sessionData, error: sessionError },
+      { data: profileRows, error: profilesError },
+      { data: biddingRows, error: biddingError },
+      { data: assignedRows, error: assignedError },
+      { data: pendingRows, error: pendingError },
+      { data: completedRows, error: completedError },
+    ] = await Promise.all([
+      supabase.auth.getSession(),
+      supabase.from("profiles").select("*").order("total_points", { ascending: false }),
+      supabase
+        .from("chores")
+        .select("*, bids(bid_amount, player_id, created_at)")
+        .eq("status", "bidding_open")
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("chores")
+        .select("*, profiles:assigned_to(display_name, avatar_url, username)")
+        .eq("status", "assigned")
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("chores")
+        .select("*, profiles:assigned_to(display_name, avatar_url, username)")
+        .eq("status", "pending_approval")
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("chores")
+        .select("*, profiles:assigned_to(display_name, avatar_url, username)")
+        .eq("status", "completed")
+        .order("created_at", { ascending: false })
+        .limit(8),
+    ]);
+
+    const firstError = sessionError ?? profilesError ?? biddingError ?? assignedError ?? pendingError ?? completedError;
+    if (firstError) {
+      setMessage(firstError.message);
+      return;
+    }
+
+    const loadedProfiles = (profileRows ?? []) as Profile[];
+    const authUserId = sessionData.session?.user.id;
+    setProfiles(loadedProfiles);
+    setCurrentProfile(loadedProfiles.find((profile) => profile.id === authUserId) ?? null);
+    setChores((biddingRows ?? []) as ChoreWithBid[]);
+    setActiveChores((assignedRows ?? []) as ActiveChore[]);
+    setPendingChores((pendingRows ?? []) as ActiveChore[]);
+    setCompletedChores((completedRows ?? []) as ActiveChore[]);
   }, []);
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    const client = supabase;
+    if (!client) {
+      return;
     }
-  }, [state]);
+
+    void loadData();
+
+    const channel = client
+      .channel("chorequest-live-dashboard")
+      .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => void loadData())
+      .on("postgres_changes", { event: "*", schema: "public", table: "chores" }, () => void loadData())
+      .on("postgres_changes", { event: "*", schema: "public", table: "bids" }, () => void loadData())
+      .subscribe();
+
+    const {
+      data: { subscription },
+    } = client.auth.onAuthStateChange(() => {
+      void loadData();
+    });
+
+    return () => {
+      void client.removeChannel(channel);
+      subscription.unsubscribe();
+    };
+  }, [loadData]);
 
   useEffect(() => {
     if (!stageRef.current) {
@@ -213,90 +164,71 @@ export function Dashboard() {
       loop: true,
       ease: "linear",
     });
-  }, [activeUserId]);
+  }, [currentProfile?.id]);
 
-  const activeUser = useMemo(
-    () => state.users.find((user) => user.id === activeUserId) ?? null,
-    [activeUserId, state.users],
-  );
-  const players = useMemo(() => state.users.filter((user) => user.role === "player"), [state.users]);
-  const leaderboard = useMemo(
-    () => [...players].sort((a, b) => b.points - a.points),
-    [players],
-  );
-  const openChores = state.chores.filter((chore) => chore.status === "bidding_open");
-  const activeChores = state.chores.filter((chore) => chore.status === "assigned");
-  const pendingChores = state.chores.filter((chore) => chore.status === "pending_approval");
-  const completedChores = state.chores.filter((chore) => chore.status === "completed");
-
-  function saveSession(userId: string | null) {
-    setActiveUserId(userId);
-    if (!userId) {
-      window.localStorage.removeItem(SESSION_KEY);
-      return;
-    }
-    window.localStorage.setItem(SESSION_KEY, userId);
-  }
-
-  function handleLogin() {
-    const user = state.users.find(
-      (candidate) =>
-        candidate.username.toLowerCase() === login.username.trim().toLowerCase() &&
-        candidate.password === login.password,
-    );
-
-    if (!user) {
-      setMessage("No matching username and password found.");
+  async function handleLogin() {
+    if (!supabase) {
+      setMessage("Supabase is not configured.");
       return;
     }
 
-    saveSession(user.id);
-    setMessage(user.role === "admin" ? "Admin console unlocked." : `Welcome back, ${user.displayName}.`);
+    const email = usernameToEmail(login.username);
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password: login.password,
+    });
+
+    if (error) {
+      setMessage(error.message);
+      return;
+    }
+
+    setLogin((current) => ({ ...current, password: "" }));
+    setMessage("Signed in.");
+    await loadData();
   }
 
-  function handleLogout() {
-    saveSession(null);
+  async function handleLogout() {
+    if (!supabase) {
+      return;
+    }
+
+    await supabase.auth.signOut();
+    setCurrentProfile(null);
     setMessage("Signed out.");
   }
 
   function createUser() {
-    if (!activeUser || activeUser.role !== "admin") {
+    const client = supabase;
+    if (!client || !currentProfile || !isAdmin) {
       return;
     }
 
-    const username = newUser.username.trim().toLowerCase();
-    const displayName = newUser.displayName.trim();
-    if (!displayName || !username || !newUser.password.trim()) {
-      setMessage("Enter a display name, username, and first password.");
-      return;
-    }
+    startTransition(async () => {
+      const { data } = await client.auth.getSession();
+      const accessToken = data.session?.access_token;
+      if (!accessToken) {
+        setMessage("Your admin session expired. Sign in again.");
+        return;
+      }
 
-    if (state.users.some((user) => user.username.toLowerCase() === username)) {
-      setMessage("That username already exists.");
-      return;
-    }
+      const result = await createPlayerAction({
+        accessToken,
+        displayName: newUser.displayName,
+        username: newUser.username,
+        password: newUser.password,
+      });
 
-    setState((current) => ({
-      ...current,
-      users: [
-        ...current.users,
-        {
-          id: createId("player"),
-          username,
-          password: newUser.password,
-          displayName,
-          role: "player",
-          points: 0,
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    }));
-    setNewUser({ displayName: "", username: "", password: "" });
-    setMessage(`${displayName} can now log in with the password you set.`);
+      setMessage(result.message);
+      if (result.ok) {
+        setNewUser({ displayName: "", username: "", password: "" });
+        await loadData();
+      }
+    });
   }
 
-  function createChore() {
-    if (!activeUser || activeUser.role !== "admin") {
+  async function createChore() {
+    if (!supabase || !isAdmin) {
       return;
     }
 
@@ -306,30 +238,26 @@ export function Dashboard() {
       return;
     }
 
-    setState((current) => ({
-      ...current,
-      chores: [
-        {
-          id: createId("quest"),
-          title: newChore.title.trim(),
-          description: newChore.description.trim(),
-          frequency: newChore.frequency,
-          basePoints: Math.floor(basePoints),
-          status: "bidding_open",
-          assignedTo: null,
-          finalPoints: null,
-          bids: [],
-          createdAt: new Date().toISOString(),
-        },
-        ...current.chores,
-      ],
-    }));
+    const { error } = await supabase.from("chores").insert({
+      title: newChore.title.trim(),
+      description: newChore.description.trim(),
+      frequency: newChore.frequency,
+      base_points: Math.floor(basePoints),
+      status: "bidding_open",
+    });
+
+    if (error) {
+      setMessage(error.message);
+      return;
+    }
+
     setNewChore({ title: "", description: "", frequency: "weekly", basePoints: "100" });
     setMessage("New chore posted to the bidding board.");
+    await loadData();
   }
 
-  function placeBid(choreId: string) {
-    if (!activeUser || activeUser.role !== "player") {
+  async function placeBid(choreId: string) {
+    if (!supabase || !currentProfile || !isPlayer) {
       setMessage("Only players can bid on chores.");
       return;
     }
@@ -340,110 +268,59 @@ export function Dashboard() {
       return;
     }
 
-    setState((current) => ({
-      ...current,
-      chores: current.chores.map((chore) => {
-        if (chore.id !== choreId || chore.status !== "bidding_open") {
-          return chore;
-        }
+    const { error } = await supabase.from("bids").upsert(
+      {
+        chore_id: choreId,
+        player_id: currentProfile.id,
+        bid_amount: Math.floor(amount),
+      },
+      { onConflict: "chore_id,player_id" },
+    );
 
-        const bids = chore.bids.filter((bid) => bid.playerId !== activeUser.id);
-        return {
-          ...chore,
-          bids: [...bids, { playerId: activeUser.id, amount: Math.floor(amount), createdAt: new Date().toISOString() }],
-        };
-      }),
-    }));
+    if (error) {
+      setMessage(error.message);
+      return;
+    }
+
     setDraftBids((current) => ({ ...current, [choreId]: "" }));
     setMessage("Bid locked in. Lowest bid wins when admin closes the quest.");
+    await loadData();
   }
 
-  function closeBidding(choreId: string) {
-    if (!activeUser || activeUser.role !== "admin") {
+  async function closeBidding(choreId: string) {
+    if (!supabase || !isAdmin) {
       return;
     }
 
-    let winnerName = "";
-    setState((current) => ({
-      ...current,
-      chores: current.chores.map((chore) => {
-        if (chore.id !== choreId || chore.status !== "bidding_open") {
-          return chore;
-        }
-
-        const winningBid = [...chore.bids].sort((a, b) => a.amount - b.amount || a.createdAt.localeCompare(b.createdAt))[0];
-        if (!winningBid) {
-          setMessage("This chore has no bids yet.");
-          return chore;
-        }
-
-        winnerName = current.users.find((user) => user.id === winningBid.playerId)?.displayName ?? "Player";
-        return {
-          ...chore,
-          status: "assigned",
-          assignedTo: winningBid.playerId,
-          finalPoints: winningBid.amount,
-        };
-      }),
-    }));
-
-    if (winnerName) {
-      setMessage(`${winnerName} won the chore with the lowest bid.`);
-    }
+    const { error } = await supabase.rpc("close_chore_bidding", { chore_uuid: choreId });
+    setMessage(error ? error.message : "Bidding closed and the lowest bidder was assigned.");
+    await loadData();
   }
 
-  function submitForApproval(choreId: string) {
-    if (!activeUser) {
+  async function submitForApproval(choreId: string) {
+    if (!supabase || !currentProfile) {
       return;
     }
 
-    setState((current) => ({
-      ...current,
-      chores: current.chores.map((chore) =>
-        chore.id === choreId && chore.assignedTo === activeUser.id && chore.status === "assigned"
-          ? { ...chore, status: "pending_approval" }
-          : chore,
-      ),
-    }));
-    setMessage("Chore submitted. Another player can approve it.");
+    const { error } = await supabase
+      .from("chores")
+      .update({ status: "pending_approval" })
+      .eq("id", choreId)
+      .eq("assigned_to", currentProfile.id);
+
+    setMessage(error ? error.message : "Chore submitted. Another player can approve it.");
+    await loadData();
   }
 
-  function approveChore(choreId: string) {
-    if (!activeUser || activeUser.role !== "player") {
+  async function approveChore(choreId: string) {
+    if (!supabase || !isPlayer) {
       setMessage("Only another player can approve completed chores.");
       return;
     }
 
-    let approved = false;
-    setState((current) => {
-      const target = current.chores.find((chore) => chore.id === choreId);
-      if (!target || target.status !== "pending_approval" || target.assignedTo === activeUser.id || !target.assignedTo) {
-        setMessage("The assignee cannot approve their own chore.");
-        return current;
-      }
-
-      approved = true;
-      const points = target.finalPoints ?? target.basePoints;
-      return {
-        users: current.users.map((user) =>
-          user.id === target.assignedTo ? { ...user, points: user.points + points } : user,
-        ),
-        chores: current.chores.map((chore) =>
-          chore.id === choreId ? { ...chore, status: "completed" } : chore,
-        ),
-      };
-    });
-
-    if (approved) {
-      setMessage("Approved. Points have been awarded.");
-    }
-  }
-
-  function resetDemo() {
-    const seeded = cloneDefaultState();
-    setState(seeded);
-    saveSession(null);
-    setMessage("Demo data reset. Admin login is ready again.");
+    const { error } = await supabase.rpc("approve_chore", { chore_uuid: choreId });
+    setMessage(error ? error.message : "Approved. Points have been awarded.");
+    await loadData();
   }
 
   return (
@@ -476,7 +353,7 @@ export function Dashboard() {
             </p>
           </div>
           <SessionPanel
-            activeUser={activeUser}
+            activeUser={currentProfile}
             login={login}
             setLogin={setLogin}
             onLogin={handleLogin}
@@ -491,9 +368,9 @@ export function Dashboard() {
         <section className="grid gap-5 lg:grid-cols-[0.88fr_1.42fr]">
           <Leaderboard users={leaderboard} />
           <QuestBoard
-            chores={openChores}
-            users={state.users}
-            activeUser={activeUser}
+            chores={chores}
+            users={profiles}
+            activeUser={currentProfile}
             draftBids={draftBids}
             setDraftBids={setDraftBids}
             onBid={placeBid}
@@ -501,46 +378,43 @@ export function Dashboard() {
           />
         </section>
 
-        {activeUser?.role === "admin" ? (
+        {isAdmin ? (
           <AdminConsole
+            isPending={isPending}
             newUser={newUser}
             setNewUser={setNewUser}
             newChore={newChore}
             setNewChore={setNewChore}
-            users={players}
+            users={leaderboard}
             onCreateUser={createUser}
             onCreateChore={createChore}
-            onResetDemo={resetDemo}
           />
         ) : null}
 
-        {activeUser ? (
+        {currentProfile ? (
           <section className="grid gap-5 lg:grid-cols-3">
             <QuestLane
               title="Active Quests"
               icon={<Swords className="h-5 w-5 text-teal-200" aria-hidden />}
-              chores={activeChores.filter((chore) => activeUser.role === "admin" || chore.assignedTo === activeUser.id)}
-              users={state.users}
+              chores={activeChores.filter((chore) => isAdmin || chore.assigned_to === currentProfile.id)}
               empty="No active quests."
               actionLabel="Submit"
               onAction={submitForApproval}
-              canAct={(chore) => activeUser.role === "player" && chore.assignedTo === activeUser.id}
+              canAct={(chore) => isPlayer && chore.assigned_to === currentProfile.id}
             />
             <QuestLane
               title="Approval Gate"
               icon={<ClipboardCheck className="h-5 w-5 text-orange-200" aria-hidden />}
-              chores={pendingChores.filter((chore) => activeUser.role === "admin" || chore.assignedTo !== activeUser.id)}
-              users={state.users}
+              chores={pendingChores.filter((chore) => isAdmin || chore.assigned_to !== currentProfile.id)}
               empty="No quests waiting."
               actionLabel="Approve"
               onAction={approveChore}
-              canAct={(chore) => activeUser.role === "player" && chore.assignedTo !== activeUser.id}
+              canAct={(chore) => isPlayer && chore.assigned_to !== currentProfile.id}
             />
             <QuestLane
               title="Completed"
               icon={<Trophy className="h-5 w-5 text-yellow-200" aria-hidden />}
-              chores={completedChores.slice(0, 5)}
-              users={state.users}
+              chores={completedChores}
               empty="No completed quests yet."
             />
           </section>
@@ -557,7 +431,7 @@ function SessionPanel({
   onLogin,
   onLogout,
 }: {
-  activeUser: QuestUser | null;
+  activeUser: Profile | null;
   login: { username: string; password: string };
   setLogin: (value: { username: string; password: string }) => void;
   onLogin: () => void;
@@ -569,7 +443,7 @@ function SessionPanel({
         <div className="flex items-center gap-3">
           <Avatar user={activeUser} />
           <div className="min-w-0">
-            <p className="truncate text-sm font-black text-white">{activeUser.displayName}</p>
+            <p className="truncate text-sm font-black text-white">{activeUser.display_name ?? activeUser.username ?? "Player"}</p>
             <p className="text-xs uppercase tracking-[0.16em] text-slate-400">{activeUser.role}</p>
           </div>
         </div>
@@ -588,14 +462,14 @@ function SessionPanel({
     <aside className="rounded-md border border-white/10 bg-[#101418]/80 p-4 shadow-[0_18px_60px_rgba(0,0,0,0.28)]">
       <div className="mb-3 flex items-center gap-2 text-sm font-black text-white">
         <Lock className="h-4 w-4 text-orange-200" aria-hidden />
-        Static login
+        Supabase login
       </div>
       <div className="grid gap-2">
         <input
           value={login.username}
           onChange={(event) => setLogin({ ...login, username: event.target.value })}
           className="min-h-11 rounded-md border border-white/10 bg-white/[0.08] px-3 text-sm text-white outline-none transition focus:border-teal-200"
-          placeholder="Username"
+          placeholder="Username or email"
         />
         <input
           value={login.password}
@@ -613,17 +487,18 @@ function SessionPanel({
         </button>
       </div>
       <p className="mt-3 text-xs leading-5 text-slate-400">
-        Admin: `{ADMIN_USERNAME}` / `{ADMIN_PASSWORD}`
+        Usernames are mapped to `username@chorequest.local` for Supabase Auth.
       </p>
     </aside>
   );
 }
 
-function Leaderboard({ users }: { users: QuestUser[] }) {
+function Leaderboard({ users }: { users: Profile[] }) {
   return (
     <section className="motion-card rounded-md border border-white/10 bg-[#101418]/75 p-4 shadow-[0_18px_60px_rgba(0,0,0,0.28)]">
       <PanelTitle icon={<Crown className="h-5 w-5 text-yellow-200" aria-hidden />} title="Hall of Points" />
       <div className="mt-4 space-y-3">
+        {users.length === 0 ? <EmptyState label="No players yet. Admin can create the first one." /> : null}
         {users.map((user, index) => (
           <article key={user.id} className="grid grid-cols-[auto_auto_1fr_auto] items-center gap-3 rounded-md border border-white/10 bg-white/[0.06] p-3">
             <div className="grid h-9 w-9 place-items-center rounded-md bg-yellow-200 text-sm font-black text-[#1a1508]">
@@ -631,10 +506,10 @@ function Leaderboard({ users }: { users: QuestUser[] }) {
             </div>
             <Avatar user={user} />
             <div className="min-w-0">
-              <h3 className="truncate text-sm font-black text-white">{user.displayName}</h3>
-              <p className="text-xs text-slate-400">@{user.username}</p>
+              <h3 className="truncate text-sm font-black text-white">{user.display_name ?? user.username ?? "Player"}</h3>
+              <p className="text-xs text-slate-400">@{user.username ?? "player"}</p>
             </div>
-            <p className="text-xl font-black text-teal-100">{user.points}</p>
+            <p className="text-xl font-black text-teal-100">{user.total_points}</p>
           </article>
         ))}
       </div>
@@ -651,9 +526,9 @@ function QuestBoard({
   onBid,
   onClose,
 }: {
-  chores: QuestChore[];
-  users: QuestUser[];
-  activeUser: QuestUser | null;
+  chores: ChoreWithBid[];
+  users: Profile[];
+  activeUser: Profile | null;
   draftBids: Record<string, string>;
   setDraftBids: (value: Record<string, string>) => void;
   onBid: (choreId: string) => void;
@@ -665,9 +540,9 @@ function QuestBoard({
       <div className="mt-4 grid gap-3">
         {chores.length === 0 ? <EmptyState label="No open chores. Admin can post a new one." /> : null}
         {chores.map((chore) => {
-          const lowestBid = chore.bids.length ? Math.min(...chore.bids.map((bid) => bid.amount)) : null;
-          const leader = chore.bids.find((bid) => bid.amount === lowestBid);
-          const leaderName = users.find((user) => user.id === leader?.playerId)?.displayName;
+          const lowestBid = chore.bids.length ? Math.min(...chore.bids.map((bid) => bid.bid_amount)) : null;
+          const leader = chore.bids.find((bid) => bid.bid_amount === lowestBid);
+          const leaderName = users.find((user) => user.id === leader?.player_id)?.display_name;
 
           return (
             <article key={chore.id} className="rounded-md border border-white/10 bg-[linear-gradient(145deg,rgba(255,255,255,0.09),rgba(255,255,255,0.035))] p-4">
@@ -678,7 +553,7 @@ function QuestBoard({
                       {chore.frequency}
                     </span>
                     <span className="rounded border border-white/10 px-2 py-1 text-xs font-bold text-slate-300">
-                      Base {chore.basePoints}
+                      Base {chore.base_points}
                     </span>
                   </div>
                   <h3 className="mt-3 text-2xl font-black tracking-normal text-white">{chore.title}</h3>
@@ -728,6 +603,7 @@ function QuestBoard({
 }
 
 function AdminConsole({
+  isPending,
   newUser,
   setNewUser,
   newChore,
@@ -735,16 +611,15 @@ function AdminConsole({
   users,
   onCreateUser,
   onCreateChore,
-  onResetDemo,
 }: {
+  isPending: boolean;
   newUser: { displayName: string; username: string; password: string };
   setNewUser: (value: { displayName: string; username: string; password: string }) => void;
-  newChore: { title: string; description: string; frequency: QuestChore["frequency"]; basePoints: string };
-  setNewChore: (value: { title: string; description: string; frequency: QuestChore["frequency"]; basePoints: string }) => void;
-  users: QuestUser[];
+  newChore: { title: string; description: string; frequency: ChoreFrequency; basePoints: string };
+  setNewChore: (value: { title: string; description: string; frequency: ChoreFrequency; basePoints: string }) => void;
+  users: Profile[];
   onCreateUser: () => void;
   onCreateChore: () => void;
-  onResetDemo: () => void;
 }) {
   return (
     <section className="motion-card grid gap-5 rounded-md border border-teal-200/20 bg-teal-200/[0.07] p-4 shadow-[0_18px_60px_rgba(0,0,0,0.28)] lg:grid-cols-[1fr_1fr_0.85fr]">
@@ -753,8 +628,8 @@ function AdminConsole({
         <div className="mt-4 grid gap-2">
           <input className="field" placeholder="Display name" value={newUser.displayName} onChange={(event) => setNewUser({ ...newUser, displayName: event.target.value })} />
           <input className="field" placeholder="Username" value={newUser.username} onChange={(event) => setNewUser({ ...newUser, username: event.target.value })} />
-          <input className="field" placeholder="First password" value={newUser.password} onChange={(event) => setNewUser({ ...newUser, password: event.target.value })} />
-          <button onClick={onCreateUser} className="action-button bg-teal-200 text-[#101418] hover:bg-teal-100">
+          <input className="field" placeholder="First password" type="password" value={newUser.password} onChange={(event) => setNewUser({ ...newUser, password: event.target.value })} />
+          <button disabled={isPending} onClick={onCreateUser} className="action-button bg-teal-200 text-[#101418] hover:bg-teal-100 disabled:opacity-50">
             <KeyRound className="h-4 w-4" aria-hidden />
             Add login
           </button>
@@ -766,7 +641,7 @@ function AdminConsole({
           <input className="field" placeholder="Chore title" value={newChore.title} onChange={(event) => setNewChore({ ...newChore, title: event.target.value })} />
           <input className="field" placeholder="Description" value={newChore.description} onChange={(event) => setNewChore({ ...newChore, description: event.target.value })} />
           <div className="grid gap-2 sm:grid-cols-[1fr_7rem]">
-            <select className="field" value={newChore.frequency} onChange={(event) => setNewChore({ ...newChore, frequency: event.target.value as QuestChore["frequency"] })}>
+            <select className="field" value={newChore.frequency} onChange={(event) => setNewChore({ ...newChore, frequency: event.target.value as ChoreFrequency })}>
               <option value="daily">daily</option>
               <option value="weekly">weekly</option>
               <option value="one-off">one-off</option>
@@ -785,16 +660,13 @@ function AdminConsole({
           {users.map((user) => (
             <div key={user.id} className="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-white/[0.06] px-3 py-2">
               <div className="min-w-0">
-                <p className="truncate text-sm font-bold text-white">{user.displayName}</p>
+                <p className="truncate text-sm font-bold text-white">{user.display_name ?? user.username}</p>
                 <p className="text-xs text-slate-400">@{user.username}</p>
               </div>
-              <p className="text-sm font-black text-teal-100">{user.points}</p>
+              <p className="text-sm font-black text-teal-100">{user.total_points}</p>
             </div>
           ))}
         </div>
-        <button onClick={onResetDemo} className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-md border border-white/10 bg-white/10 px-3 text-sm font-bold text-white transition hover:bg-white/15">
-          Reset demo
-        </button>
       </div>
     </section>
   );
@@ -804,7 +676,6 @@ function QuestLane({
   title,
   icon,
   chores,
-  users,
   empty,
   actionLabel,
   onAction,
@@ -812,36 +683,32 @@ function QuestLane({
 }: {
   title: string;
   icon: React.ReactNode;
-  chores: QuestChore[];
-  users: QuestUser[];
+  chores: ActiveChore[];
   empty: string;
   actionLabel?: string;
   onAction?: (choreId: string) => void;
-  canAct?: (chore: QuestChore) => boolean;
+  canAct?: (chore: ActiveChore) => boolean;
 }) {
   return (
     <section className="motion-card rounded-md border border-white/10 bg-[#101418]/75 p-4 shadow-[0_18px_60px_rgba(0,0,0,0.28)]">
       <PanelTitle icon={icon} title={title} />
       <div className="mt-4 space-y-3">
         {chores.length === 0 ? <EmptyState label={empty} /> : null}
-        {chores.map((chore) => {
-          const assignee = users.find((user) => user.id === chore.assignedTo);
-          return (
-            <article key={chore.id} className="rounded-md border border-white/10 bg-white/[0.06] p-3">
-              <h3 className="font-black text-white">{chore.title}</h3>
-              <p className="mt-1 text-sm leading-6 text-slate-300">{chore.description}</p>
-              <p className="mt-2 text-xs font-bold uppercase tracking-[0.16em] text-slate-400">
-                {assignee?.displayName ?? "Unassigned"} | {chore.finalPoints ?? chore.basePoints} pts
-              </p>
-              {actionLabel && onAction && canAct?.(chore) ? (
-                <button onClick={() => onAction(chore.id)} className="mt-3 inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-teal-200 px-3 text-sm font-black text-[#101418] transition hover:bg-teal-100">
-                  {actionLabel === "Approve" ? <Check className="h-4 w-4" aria-hidden /> : <Send className="h-4 w-4" aria-hidden />}
-                  {actionLabel}
-                </button>
-              ) : null}
-            </article>
-          );
-        })}
+        {chores.map((chore) => (
+          <article key={chore.id} className="rounded-md border border-white/10 bg-white/[0.06] p-3">
+            <h3 className="font-black text-white">{chore.title}</h3>
+            <p className="mt-1 text-sm leading-6 text-slate-300">{chore.description}</p>
+            <p className="mt-2 text-xs font-bold uppercase tracking-[0.16em] text-slate-400">
+              {chore.profiles?.display_name ?? chore.profiles?.username ?? "Unassigned"} | {chore.final_points ?? chore.base_points} pts
+            </p>
+            {actionLabel && onAction && canAct?.(chore) ? (
+              <button onClick={() => onAction(chore.id)} className="mt-3 inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-teal-200 px-3 text-sm font-black text-[#101418] transition hover:bg-teal-100">
+                {actionLabel === "Approve" ? <Check className="h-4 w-4" aria-hidden /> : <Send className="h-4 w-4" aria-hidden />}
+                {actionLabel}
+              </button>
+            ) : null}
+          </article>
+        ))}
       </div>
     </section>
   );
@@ -856,10 +723,11 @@ function PanelTitle({ icon, title }: { icon: React.ReactNode; title: string }) {
   );
 }
 
-function Avatar({ user }: { user: QuestUser }) {
+function Avatar({ user }: { user: Pick<Profile, "display_name" | "username"> }) {
+  const name = user.display_name ?? user.username ?? "P";
   return (
     <div className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-white/10 bg-[linear-gradient(145deg,#2dd4bf,#f59e0b)] text-sm font-black text-[#101418]">
-      {user.displayName.slice(0, 1).toUpperCase()}
+      {name.slice(0, 1).toUpperCase()}
     </div>
   );
 }

@@ -11,8 +11,8 @@ import Link from "next/link";
 
 const adminSteps = [
   {
-    title: "Log in as admin",
-    text: "Use admin and ChoreQuest#2026 on the main page.",
+    title: "Bootstrap admin",
+    text: "Create admin@chorequest.local in Supabase Auth, then mark that profile as admin in the profiles table.",
     icon: <KeyRound className="h-5 w-5" aria-hidden />,
   },
   {
@@ -68,7 +68,7 @@ export default function HowToPage() {
             Post chores, bid for work, verify completion.
           </h1>
           <p className="mt-4 max-w-2xl text-base leading-7 text-slate-300">
-            This version uses static browser storage for a local household demo. It is fast to try, but it is not a secure authentication system.
+            This version uses Supabase Auth, database roles, and row-level security. Admin-only user creation runs on the server with the Supabase service role key.
           </p>
         </section>
 
@@ -78,11 +78,11 @@ export default function HowToPage() {
         </section>
 
         <section className="mt-5 rounded-md border border-orange-200/20 bg-orange-200/10 p-5">
-          <h2 className="text-xl font-black">Default credentials</h2>
+          <h2 className="text-xl font-black">Login model</h2>
           <div className="mt-3 grid gap-3 text-sm text-slate-200 sm:grid-cols-3">
-            <Credential label="Admin" value="admin / ChoreQuest#2026" />
-            <Credential label="Demo player" value="mika / mika123" />
-            <Credential label="Demo player" value="ari / ari123" />
+            <Credential label="Admin email" value="admin@chorequest.local" />
+            <Credential label="Admin username" value="admin" />
+            <Credential label="Player email pattern" value="username@chorequest.local" />
           </div>
         </section>
       </div>

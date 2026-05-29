@@ -7,8 +7,10 @@ export type ChoreStatus =
 
 export type Profile = {
   id: string;
+  username: string | null;
   display_name: string | null;
   avatar_url: string | null;
+  role: "admin" | "player";
   total_points: number;
   created_at: string;
 };
@@ -34,11 +36,11 @@ export type Bid = {
 };
 
 export type ChoreWithBid = Chore & {
-  bids: Array<Pick<Bid, "bid_amount" | "player_id">>;
+  bids: Array<Pick<Bid, "bid_amount" | "player_id" | "created_at">>;
 };
 
 export type ActiveChore = Chore & {
-  profiles: Pick<Profile, "display_name" | "avatar_url"> | null;
+  profiles: Pick<Profile, "display_name" | "avatar_url" | "username"> | null;
 };
 
 export type Database = {
@@ -48,8 +50,10 @@ export type Database = {
         Row: Profile;
         Insert: {
           id: string;
+          username?: string | null;
           display_name?: string | null;
           avatar_url?: string | null;
+          role?: "admin" | "player";
           total_points?: number;
           created_at?: string;
         };
@@ -117,6 +121,10 @@ export type Database = {
       approve_chore: {
         Args: { chore_uuid: string };
         Returns: Chore;
+      };
+      is_admin: {
+        Args: { user_uuid?: string };
+        Returns: boolean;
       };
     };
   };
